@@ -75,12 +75,28 @@ GLOBAL_LIST(admin_objective_list) //Prefilled admin assignable objective list
  * Escaped includes minds with alive, non-exiled mobs generally.
  */
 
-/proc/considered_escaped(datum/mind/escapee)
+/proc/considered_escaped(datum/mind/escapee, admin_override = FALSE)
 	if(!considered_alive(escapee))
 		return FALSE
 	//if(SSticker.force_ending) // Just let them win.
 		//return TRUE
-	var/area/current_area = get_area(escapee)
+	var/area/current_area = get_area(escapee.current)
+	var/list/allowed_areas = list(
+		/area/shuttle/ert/pmc,
+		/area/shuttle/big_ert,
+		/area/shuttle/ert/ufo,
+		/area/shuttle/ert/upp,
+		/area/shuttle/pod_1,
+		/area/shuttle/pod_2,
+		/area/shuttle/pod_3,
+		/area/shuttle/pod_4,
+		/area/shuttle/escape_pod,
+	)
+	if(admin_override)
+		if(is_mainship_level(escapee.current.z))
+			return FALSE
+		if(current_area.type in allowed_areas) // Ship only
+			return TRUE
 	if(!current_area)
 		return FALSE
 	if(!istype(current_area, /area/shuttle/escape_pod)) //have to escape in a pod or escape shuttle, at least for the time being
@@ -184,13 +200,15 @@ GLOBAL_LIST(admin_objective_list) //Prefilled admin assignable objective list
 		/datum/objective/survive,
 		/datum/objective/escape,
 		/datum/objective/protect,
-		/datum/objective/winoperation,
-		/datum/objective/loseoperation,
+		/datum/objective/marineswinoperation,
+		/datum/objective/marinesloseoperation,
 		/datum/objective/escape_with,
 		/datum/objective/gather_cash,
 		/datum/objective/kill_zombies,
 		/datum/objective/seize_area,
 		/datum/objective/kill_other_factions,
+		/datum/objective/fixallgenerators,
+		/datum/objective/fixnumberofgenerators,
 		/datum/objective/custom,
 	),/proc/cmp_typepaths_asc)
 
@@ -213,25 +231,33 @@ GLOBAL_LIST(admin_objective_list) //Prefilled admin assignable objective list
 	name = "escape"
 	explanation_text = "Escape on a shuttle or an escape pod alive and without being in custody."
 	team_explanation_text = "Have all members of your team escape on a shuttle or pod alive, without being in custody."
+	///passed to considered_escaped, if true allows greentext by simply being on a shuttle not on ship level by round end
+	var/admin_event = FALSE
 
 /datum/objective/escape/check_completion()
-	if(!considered_escaped(owner))
+	if(!considered_escaped(owner, admin_event))
 		return FALSE
 	return TRUE
 
 /datum/objective/escape/find_target(dupe_search_range, blacklist)
 	return
 
+/datum/objective/escape/admin_edit(mob/admin)
+	if(tgui_alert(admin, "Relax escape requirements (recommended for admin events)?", "Continue?", list("Yes", "No")) != "No")
+		admin_event = TRUE
+
 /datum/objective/escape_with
 	name = "kidnap"
 	explanation_text = "Have both you and your target escape alive and unharmed on a shuttle or pod."
 	team_explanation_text = "Have both you and your target escape alive and unharmed on a shuttle or pod."
 	avoid_double_target = TRUE
+	///passed to considered_escaped, if true allows greentext by simply being on a shuttle not on ship level by round end
+	var/admin_event = FALSE
 
 /datum/objective/escape_with/check_completion()
-	if(!considered_escaped(owner))
+	if(!considered_escaped(owner, admin_event))
 		return FALSE
-	if(!considered_escaped(target))
+	if(!considered_escaped(target, admin_event))
 		return FALSE
 	for(var/mob/M in range(4)) //enough to cover the entirety of an escape shuttle
 		if(M.mind == null)
@@ -251,6 +277,8 @@ GLOBAL_LIST(admin_objective_list) //Prefilled admin assignable objective list
 
 /datum/objective/escape_with/admin_edit(mob/admin)
 	admin_simple_target_pick(admin)
+	if(tgui_alert(admin, "Relax escape requirements (recommended for admin events)?", "Continue?", list("Yes", "No")) != "No")
+		admin_event = TRUE
 
 /datum/objective/survive
 	name = "survive"
@@ -402,12 +430,12 @@ GLOBAL_LIST_EMPTY(possible_items)
 				return TRUE
 	return FALSE
 
-/datum/objective/loseoperation
+/datum/objective/marinesloseoperation
 	name = "lose operation"
 	explanation_text = "Make sure the operation is a failure, do not get your hands dirty."
 	team_explanation_text = "Make sure the operation is a failure, do not get your hands dirty."
 
-/datum/objective/loseoperation/check_completion()
+/datum/objective/marinesloseoperation/check_completion()
 	if(SSticker.mode.round_finished == MODE_INFESTATION_X_MINOR)
 		return TRUE
 	else if(SSticker.mode.round_finished == MODE_INFESTATION_X_MAJOR)
@@ -415,12 +443,12 @@ GLOBAL_LIST_EMPTY(possible_items)
 	else
 		return FALSE
 
-/datum/objective/winoperation
+/datum/objective/marineswinoperation
 	name = "win operation"
 	explanation_text = "Make sure the operation is a success."
 	team_explanation_text = "Make sure the operation is a success."
 
-/datum/objective/winoperation/check_completion()
+/datum/objective/marineswinoperation/check_completion()
 	if(SSticker.mode.round_finished == MODE_INFESTATION_M_MINOR)
 		return TRUE
 	else if(SSticker.mode.round_finished == MODE_INFESTATION_M_MAJOR)
@@ -492,14 +520,32 @@ GLOBAL_LIST_EMPTY(possible_items)
 	name = "kill all zombies"
 	explanation_text = "Eliminate all zombies and keep them from rising again. Rip and tear!"
 	team_explanation_text = "Eliminate all zombies. Rip and tear!"
+	///can the players miss zombies and still complete the objective?
+	var/marginoferror = FALSE
+	///how many zombies are still living
+	var/existing_shamblers
+	///how many zombies can we miss
+	var/missed_zombies
 
 /datum/objective/kill_zombies/check_completion()
+	existing_shamblers = 0
 	for(var/mob/living/carbon/human/affectedmob in GLOB.mob_list)
 		if(iszombie(affectedmob))
 			for(var/datum/internal_organ/affectedorgan in affectedmob.internal_organs)
 				if(affectedorgan == affectedmob.internal_organs_by_name["heart"]) //zombies with hearts aren't truly dead
-					return FALSE
+					++existing_shamblers
+	if(marginoferror) //do we have a no tolerance policy for missing zeds?
+		if(existing_shamblers >= missed_zombies) //if the existing number of zombies is greater than the number we're allowed to miss return false
+			return FALSE
+	else if(existing_shamblers >= 1) //no tolerance policy for zombies, even one is a loss
+		return FALSE
+
 	return TRUE
+
+/datum/objective/kill_zombies/admin_edit(mob/admin)
+	if(tgui_alert(admin, "Can the player miss zombies and still win?", "Continue?", list("Yes", "No")) != "No")
+		missed_zombies = input(admin,"Set the amount of zombies the player can miss", missed_zombies) as num
+		marginoferror = TRUE
 
 /datum/objective/seize_area
 	name = "control area"
@@ -566,3 +612,41 @@ GLOBAL_LIST_EMPTY(possible_items)
 		else if(affectedmob.faction != currentfaction)
 			return FALSE
 	return TRUE
+
+/datum/objective/fixallgenerators
+	name = "fix all power generators"
+	explanation_text = "Fix all planetary power generators."
+	team_explanation_text = "Fix all planetary power generators."
+
+/datum/objective/fixallgenerators/check_completion()
+	for(var/obj/machinery/power/geothermal/generator in GLOB.generators)
+		if(generator.buildstate != 0) //we don't care about dead humans
+			return FALSE
+	return TRUE
+
+/datum/objective/fixnumberofgenerators
+	name = "fix number of generators"
+	explanation_text = "Fix number of generator as set by mission commander."
+	team_explanation_text = "Fix number of generator as set by mission commander."
+	var/numberofgenstobefixed = 0;
+
+/datum/objective/fixnumberofgenerators/check_completion()
+	var/numberofgensfixed = 0;
+	for(var/obj/machinery/power/geothermal/generator in GLOB.generators)
+		if(generator.buildstate != 0) //we don't care about dead humans
+			continue
+		++numberofgensfixed
+	if(numberofgensfixed >= numberofgenstobefixed)
+		return TRUE
+	return FALSE
+
+/datum/objective/fixnumberofgenerators/admin_edit(mob/admin)
+	numberofgenstobefixed = input(admin,"Set the amount of generators that are needed for completion of this objective", numberofgenstobefixed) as num
+	update_explanation_text()
+
+/datum/objective/fixnumberofgenerators/update_explanation_text()
+	..()
+	if(numberofgenstobefixed)
+		explanation_text = "Restore planetary power by fixing [numberofgenstobefixed] groundside."
+	else
+		explanation_text = "Repair generators groundside."
